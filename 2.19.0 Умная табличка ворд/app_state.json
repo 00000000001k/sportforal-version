@@ -1,0 +1,18 @@
+{
+  "version": "v2.19.0",
+  "tabs": [
+    {
+      "name": "1",
+      "is_current": true,
+      "event_number": null
+    }
+  ],
+  "event_common_data": {},
+  "document_blocks": [
+    {
+      "path": "",
+      "tab_name": "1",
+      "entries": {}
+    }
+  ]
+}
