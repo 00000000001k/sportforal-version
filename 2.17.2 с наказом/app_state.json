@@ -1,0 +1,21 @@
+{
+  "version": "v2.17.2",
+  "tabs": [
+    {
+      "name": "Козак геймс",
+      "is_current": true
+    }
+  ],
+  "event_common_data": {},
+  "document_blocks": [
+    {
+      "path": "C:\\Users\\Bebra\\Downloads\\program\\Версии\\2.17.2\\templates\\ШАБЛОН НАКАЗ.docm",
+      "tab_name": "Козак геймс",
+      "entries": {
+        "захід": "123",
+        "дата": "123",
+        "адреса": "123"
+      }
+    }
+  ]
+}
