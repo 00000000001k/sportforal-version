@@ -1,0 +1,22 @@
+{
+  "version": "v2.18.7",
+  "events": {
+    "1": {
+      "name": "рибалка",
+      "has_tab": true,
+      "is_current": true,
+      "common_data": {
+        "name": "рибалка",
+        "fields": {}
+      },
+      "contracts": []
+    }
+  },
+  "event_common_data": {
+    "1": {
+      "name": "рибалка",
+      "fields": {}
+    }
+  },
+  "document_blocks": []
+}
