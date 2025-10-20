@@ -1,0 +1,26 @@
+
+[2025-05-23 21:53:18]
+Traceback (most recent call last):
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\sport.py", line 87, in <module>
+    from app import launch_main_app
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\app.py", line 7, in <module>
+    from state_manager import save_current_state, restore_saved_state
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\state_manager.py", line 5, in <module>
+    from events import add_event  # если ещё не импортирована
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\events.py", line 5, in <module>
+    from state_manager import save_current_state
+ImportError: cannot import name 'save_current_state' from 'state_manager' (consider renaming 'C:\\Users\\Bebra\\Downloads\\program\\Версии\\2.12\\state_manager.py' if it has the same name as a library you intended to import)
+
+[2025-05-23 21:54:46]
+Traceback (most recent call last):
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\sport.py", line 87, in <module>
+    from app import launch_main_app
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\app.py", line 7, in <module>
+    from state_manager import save_current_state, restore_saved_state
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\state_manager.py", line 5, in <module>
+    from events import add_event  # если ещё не импортирована
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Bebra\Downloads\program\Версии\2.12\events.py", line 5, in <module>
+    from state_manager import save_current_state
+ImportError: cannot import name 'save_current_state' from 'state_manager' (consider renaming 'C:\\Users\\Bebra\\Downloads\\program\\Версии\\2.12\\state_manager.py' if it has the same name as a library you intended to import)
