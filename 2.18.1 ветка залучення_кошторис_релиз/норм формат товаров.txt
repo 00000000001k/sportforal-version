@@ -1,0 +1,712 @@
+# koshtorys.py
+# -*- coding: utf-8 -*-
+
+import os
+import tkinter.filedialog as filedialog
+import tkinter.messagebox as messagebox
+import sys
+import traceback
+from datetime import datetime
+import shutil
+
+from openpyxl.styles import Font
+from openpyxl.utils.cell import column_index_from_string
+
+
+from copy import copy
+
+
+# Спробуємо імпортувати openpyxl для роботи з Excel
+try:
+    from openpyxl import load_workbook
+    from openpyxl.styles import Border, Side, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.dimensions import RowDimension
+
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    print("Увага: openpyxl не встановлено. Буде створено текстовий файл замість Excel.")
+
+# Импортируем необходимые функции
+try:
+    from error_handler import log_error_koshtorys as log_error
+    from text_utils import number_to_ukrainian_text
+except ImportError:
+    print("Критическая ошибка: не удалось импортировать модули error_handler или text_utils для koshtorys.py")
+
+
+    def log_error(exc_type, exc_value, exc_traceback, error_log="error.txt"):
+        print(f"Ошибка (koshtorys log): {exc_value}")
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+        messagebox.showerror("Ошибка", f"Произошла ошибка (koshtorys): {str(exc_value)}")
+
+
+    def number_to_ukrainian_text(amount):
+        return f"{amount} грн (заглушка)"
+
+
+def get_entry_value(entries_dict, field_name, default=""):
+    """Отримує значення з Entry віджета"""
+    if field_name in entries_dict:
+        widget = entries_dict[field_name]
+        if hasattr(widget, 'get'):
+            return widget.get().strip()
+    return default
+
+
+def convert_to_number(value_str):
+    """Конвертує строку в число"""
+    if not value_str:
+        return 0.0
+
+    try:
+        # Замінюємо кому на крапку та видаляємо пробіли
+        clean_str = str(value_str).replace(",", ".").replace(" ", "")
+        return float(clean_str)
+    except ValueError:
+        return 0.0
+
+
+def get_товар_name_from_entries(entries):
+    """Знаходить назву товару серед різних можливих полів"""
+    # Список можливих полів для назви товару (в порядку пріоритету)
+    товар_fields = ["товар", "назва", "найменування", "предмет", "послуга", "робота", "матеріал", "дк"]
+
+    for field in товар_fields:
+        value = get_entry_value(entries, field)
+        if value:  # Якщо поле не пусте
+            return value
+
+    return ""
+
+
+def get_товари_from_blocks(document_blocks):
+    """Збирає всі товари з блоків документів"""
+    товари = []
+
+    for block in document_blocks:
+        entries = block.get("entries", {})
+
+        # Шукаємо назву товару серед різних можливих полів
+        товар = get_товар_name_from_entries(entries)
+        кількість = get_entry_value(entries, "кількість")
+
+        # Шукаємо ціну серед можливих варіантів
+        ціна = (get_entry_value(entries, "ціна за одиницю") or
+                get_entry_value(entries, "ціна") or
+                get_entry_value(entries, "вартість за одиницю") or
+                get_entry_value(entries, "вартість одиниці"))
+
+        # Шукаємо одиницю виміру
+        одиниця = (get_entry_value(entries, "одиниця виміру") or
+                   get_entry_value(entries, "од") or
+                   get_entry_value(entries, "шт") or
+                   "шт")  # за замовчуванням
+
+        if товар:  # Якщо є назва товару
+            товари.append({
+                "товар": товар,
+                "кількість": кількість,
+                "ціна за одиницю": ціна,
+                "одиниця виміру": одиниця
+            })
+
+    return товари
+
+
+def is_merged_cell(sheet, row, col):
+    """Перевіряє чи є ячейка об'єднаною"""
+    try:
+        from openpyxl.worksheet.merge import MergedCell
+        cell = sheet.cell(row, col)
+        return isinstance(cell, MergedCell)
+    except:
+        return False
+
+
+def get_merged_cell_top_left(sheet, row, col):
+    """Отримує координати верхньої лівої ячейки об'єднаної групи"""
+    try:
+        for merged_range in sheet.merged_cells.ranges:
+            if (merged_range.min_row <= row <= merged_range.max_row and
+                    merged_range.min_col <= col <= merged_range.max_col):
+                return merged_range.min_row, merged_range.min_col
+        return row, col
+    except:
+        return row, col
+
+
+def safe_set_cell_value(sheet, row, col, value):
+    """Безпечно встановлює значення ячейки (враховує об'єднані ячейки)"""
+    try:
+        if is_merged_cell(sheet, row, col):
+            # Для об'єднаної ячейки знаходимо верхню ліву ячейку
+            top_row, left_col = get_merged_cell_top_left(sheet, row, col)
+            target_cell = sheet.cell(top_row, left_col)
+            print(f"[DEBUG] Об'єднана ячейка ({row},{col}) -> встановлюємо значення в ({top_row},{left_col})")
+        else:
+            target_cell = sheet.cell(row, col)
+
+        target_cell.value = value
+        return True
+    except Exception as e:
+        print(f"[WARNING] Не вдалося встановити значення в ячейку ({row},{col}): {e}")
+        return False
+
+
+def copy_row_with_full_formatting(sheet, source_row_num, target_row_num):
+    """Копіює повне форматування рядка включаючи висоту, стилі всіх ячейок"""
+    try:
+        max_col = sheet.max_column if sheet.max_column > 0 else 26
+
+        # Копіюємо висоту рядка
+        if source_row_num in sheet.row_dimensions:
+            source_row_dim = sheet.row_dimensions[source_row_num]
+            target_row_dim = sheet.row_dimensions[target_row_num]
+            target_row_dim.height = source_row_dim.height
+            target_row_dim.hidden = source_row_dim.hidden
+            target_row_dim.outlineLevel = source_row_dim.outlineLevel
+            target_row_dim.collapsed = source_row_dim.collapsed
+
+        # Копіюємо всі ячейки з повним форматуванням
+        for col_num in range(1, max_col + 1):
+            source_cell = sheet.cell(source_row_num, col_num)
+            target_cell = sheet.cell(target_row_num, col_num)
+
+            # Пропускаємо об'єднані ячейки при копіюванні
+            if is_merged_cell(sheet, target_row_num, col_num):
+                continue
+
+            # Копіюємо значення (якщо воно не формула)
+            if source_cell.value and not str(source_cell.value).startswith('='):
+                target_cell.value = source_cell.value
+
+            # Копіюємо всі стилі через _style (найнадійніший спосіб)
+            if hasattr(source_cell, '_style'):
+                target_cell._style = source_cell._style
+
+            # Додатково копіюємо основні стилі для гарантії
+            try:
+                # Шрифт
+                if source_cell.font:
+                    target_cell.font = Font(
+                        name=source_cell.font.name,
+                        size=source_cell.font.size,
+                        bold=source_cell.font.bold,
+                        italic=source_cell.font.italic,
+                        vertAlign=source_cell.font.vertAlign,
+                        underline=source_cell.font.underline,
+                        strike=source_cell.font.strike,
+                        color=source_cell.font.color
+                    )
+
+                # Заливка
+                if source_cell.fill:
+                    target_cell.fill = PatternFill(
+                        fill_type=source_cell.fill.fill_type,
+                        start_color=source_cell.fill.start_color,
+                        end_color=source_cell.fill.end_color
+                    )
+
+                # Границі
+                if source_cell.border:
+                    target_cell.border = Border(
+                        left=source_cell.border.left,
+                        right=source_cell.border.right,
+                        top=source_cell.border.top,
+                        bottom=source_cell.border.bottom,
+                        diagonal=source_cell.border.diagonal,
+                        diagonal_direction=source_cell.border.diagonal_direction,
+                        outline=source_cell.border.outline,
+                        vertical=source_cell.border.vertical,
+                        horizontal=source_cell.border.horizontal
+                    )
+
+                # Вирівнювання
+                if source_cell.alignment:
+                    target_cell.alignment = Alignment(
+                        horizontal=source_cell.alignment.horizontal,
+                        vertical=source_cell.alignment.vertical,
+                        text_rotation=source_cell.alignment.text_rotation,
+                        wrap_text=source_cell.alignment.wrap_text,
+                        shrink_to_fit=source_cell.alignment.shrink_to_fit,
+                        indent=source_cell.alignment.indent
+                    )
+
+                # Формат чисел
+                if source_cell.number_format:
+                    target_cell.number_format = source_cell.number_format
+
+            except Exception as style_error:
+                print(f"[WARNING] Помилка копіювання стилю ячейки {col_num}: {style_error}")
+
+        print(f"[DEBUG] Скопійовано повне форматування з рядка {source_row_num} в рядок {target_row_num}")
+
+    except Exception as e:
+        print(f"[ERROR] Помилка копіювання форматування рядка: {e}")
+
+
+def insert_rows_for_products(sheet, товари_count):
+    """Вставляє рядки для товарів з збереженням структури таблиці"""
+    try:
+        # Базовий рядок для товарів в шаблоні (рядок 32)
+        base_product_row = 32
+        # Рядок після якого йде структура підсумків (зазвичай 33)
+        structure_start_row = 33
+
+        if товари_count <= 1:
+            # Якщо товар один або менше, нічого не змінюємо
+            print(f"[DEBUG] Товарів {товари_count}, додаткові рядки не потрібні")
+            return base_product_row
+
+        # Кількість додаткових рядків, які потрібно вставити
+        additional_rows = товари_count - 1
+
+        print(f"[DEBUG] Потрібно вставити {additional_rows} додаткових рядків для {товари_count} товарів")
+        print(f"[DEBUG] Базовий рядок товару: {base_product_row}")
+        print(f"[DEBUG] Початок структури таблиці: {structure_start_row}")
+
+        # Знаходимо кінець області, яку потрібно зберегти (шукаємо підписи або кінець документа)
+        preserve_end_row = structure_start_row + 20  # За замовчуванням збережемо 20 рядків
+        for row in range(structure_start_row, structure_start_row + 30):
+            try:
+                cell_value = sheet[f'A{row}'].value
+                if cell_value and ("Матеріально-відповідальна" in str(cell_value) or
+                                   "підпис" in str(cell_value).lower() or
+                                   "керівник" in str(cell_value).lower()):
+                    preserve_end_row = row + 5  # Захоплюємо ще кілька рядків після підписів
+                    print(f"[DEBUG] Знайдено область для збереження до рядка {preserve_end_row}")
+                    break
+            except:
+                continue
+
+        print(f"[DEBUG] Зберігаємо структуру таблиці: рядки {structure_start_row}-{preserve_end_row}")
+
+        # Зберігаємо ТІЛЬКИ ту частину структури, яку потрібно зсунути
+        # Рядки 33-40 (важливе форматування) НЕ ЧІПАЄМО
+        important_formatting_end = structure_start_row + 7  # Рядки 33-40 (приблизно)
+
+        # Зберігаємо тільки рядки ПІСЛЯ важливого форматування
+        movable_start_row = important_formatting_end + 1
+        saved_structure = []
+        max_col = sheet.max_column if sheet.max_column > 0 else 26
+
+        print(f"[DEBUG] Зберігаємо для переміщення рядки {movable_start_row}-{preserve_end_row}")
+
+        for row in range(movable_start_row, preserve_end_row + 1):
+            # Перевіряємо чи рядок не пустий
+            has_content = False
+            for col in range(1, max_col + 1):
+                cell = sheet.cell(row, col)
+                if cell.value is not None or (hasattr(cell, '_style') and cell._style):
+                    has_content = True
+                    break
+
+            if not has_content:
+                continue
+
+            row_data = []
+            for col in range(1, max_col + 1):
+                cell = sheet.cell(row, col)
+
+                # Пропускаємо об'єднані ячейки при збереженні
+                if is_merged_cell(sheet, row, col):
+                    row_data.append({'is_merged': True})
+                    continue
+
+                cell_data = {
+                    'value': cell.value,
+                    'style': cell._style if hasattr(cell, '_style') else None,
+                    'font': cell.font,
+                    'fill': cell.fill,
+                    'border': cell.border,
+                    'alignment': cell.alignment,
+                    'number_format': cell.number_format,
+                    'is_merged': False
+                }
+                row_data.append(cell_data)
+            saved_structure.append((row, row_data))  # Зберігаємо також номер рядка
+
+        print(f"[DEBUG] Збережено для переміщення {len(saved_structure)} рядків")
+
+        # Очищуємо ТІЛЬКИ ту область, яку будемо переміщати (НЕ рядки 33-40!)
+        for row in range(movable_start_row, preserve_end_row + 1):
+            for col in range(1, max_col + 1):
+                if not is_merged_cell(sheet, row, col):
+                    cell = sheet.cell(row, col)
+                    cell.value = None
+                    # НЕ очищуємо стилі повністю, тільки значення
+
+        # Вставляємо додаткові рядки для товарів ТІЛЬКИ після базового рядка товару
+        for i in range(additional_rows):
+            insert_position = base_product_row + 1 + i
+            sheet.insert_rows(insert_position, 1)
+            print(f"[DEBUG] Вставлено рядок товару на позиції {insert_position}")
+
+            # Копіюємо форматування з базового рядка товару
+            copy_row_with_full_formatting(sheet, base_product_row, insert_position)
+
+        # Розраховуємо нову позицію для переміщуваної структури
+        new_movable_start = movable_start_row + additional_rows
+
+        print(f"[DEBUG] Відновлюємо переміщувану структуру з рядка {new_movable_start}")
+
+        # Відновлюємо ТІЛЬКИ збережену переміщувану структуру на новому місці
+        for original_row, row_data in saved_structure:
+            # Розраховуємо нову позицію для цього рядка
+            new_row = new_movable_start + (original_row - movable_start_row)
+
+            for j, cell_data in enumerate(row_data):
+                if not cell_data.get('is_merged', False) and (
+                        cell_data.get('value') is not None or cell_data.get('style') is not None):
+                    cell = sheet.cell(new_row, j + 1)
+
+                    # Відновлюємо значення
+                    cell.value = cell_data['value']
+
+                    # Відновлюємо стилі
+                    if cell_data['style']:
+                        cell._style = cell_data['style']
+
+                    if cell_data['font']:
+                        cell.font = cell_data['font']
+                    if cell_data['fill']:
+                        cell.fill = cell_data['fill']
+                    if cell_data['border']:
+                        cell.border = cell_data['border']
+                    if cell_data['alignment']:
+                        cell.alignment = cell_data['alignment']
+                    if cell_data['number_format']:
+                        cell.number_format = cell_data['number_format']
+
+        print(f"[DEBUG] Успішно вставлено {additional_rows} рядків товарів")
+        print(f"[DEBUG] Рядки {structure_start_row}-{important_formatting_end} (важливе форматування) ЗБЕРЕЖЕНО")
+        print(f"[DEBUG] Переміщувана структура зміщена з рядків {movable_start_row} на {new_movable_start}")
+
+        return base_product_row
+
+    except Exception as e:
+        print(f"[ERROR] Помилка при вставці рядків: {e}")
+        traceback.print_exc()
+        return base_product_row
+
+
+def safe_write_to_cell(sheet, cell_reference, value):
+    """Безпечно записує значення в ячейку, враховуючи об'єднані ячейки"""
+    try:
+        # Розбираємо референс ячейки (наприклад, "K39" -> row=39, col=11)
+        from openpyxl.utils import coordinate_from_string, column_index_from_string
+        col_letter, row = coordinate_from_string(cell_reference)
+        col_num = column_index_from_string(col_letter)
+
+        return safe_set_cell_value(sheet, row, col_num, value)
+    except Exception as e:
+        print(f"[WARNING] Помилка запису в ячейку {cell_reference}: {e}")
+        return False
+
+
+def save_koshtorys_to_excel(захід, адреса, дата, товари, загальна_сума, сума_прописом):
+    """Зберігає кошторис у Excel файл на основі шаблону з правильним заповненням"""
+    try:
+        template_path = "ШАБЛОН_кошторис_розумний.xlsx"
+        output_path = f"кошторис_заповнений_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        # Перевіряємо чи існує шаблон
+        if not os.path.exists(template_path):
+            print(f"[WARNING] Шаблон {template_path} не знайдено. Створюємо простий файл.")
+            return save_koshtorys_to_text(захід, адреса, дата, товари, загальна_сума, сума_прописом)
+
+        # Копіюємо шаблон
+        shutil.copy2(template_path, output_path)
+
+        if EXCEL_AVAILABLE:
+            # Відкриваємо скопійований файл
+            workbook = load_workbook(output_path)
+            sheet = workbook.active
+
+            # Заповнюємо основні дані відповідно до вказаних ячейок
+            if захід:
+                safe_write_to_cell(sheet, 'D12', захід)
+                print(f"[DEBUG] Записано захід в D12: {захід}")
+
+            if адреса:
+                safe_write_to_cell(sheet, 'E14', адреса)
+                print(f"[DEBUG] Записано адресу в E14: {адреса}")
+
+            if дата:
+                safe_write_to_cell(sheet, 'E15', дата)
+                print(f"[DEBUG] Записано дату в E15: {дата}")
+
+            # Робимо жирний шрифт у злитій клітинці C13:E13
+            cell = sheet["C13"]
+            if is_merged_cell(sheet, 13, column_index_from_string('C')):
+                original_font = cell.font or Font()
+                new_font = copy(original_font)
+                new_font.bold = True
+                cell.font = new_font
+
+            print(f"[DEBUG] Зроблено жирний шрифт в ячейках C13:E13")
+
+            # Вставляємо додаткові рядки для товарів (це автоматично зсуне весь контент)
+            товари_count = len(товари)
+            print(f"[DEBUG] Кількість товарів: {товари_count}")
+
+            start_row = insert_rows_for_products(sheet, товари_count)
+
+            # Заповнюємо товари
+            base_b_number = 6  # Базове значення для стовпця B
+            g_column_value = 2210  # Значення для стовпця G
+
+
+
+            for i, товар_data in enumerate(товари):
+                current_row = start_row + i
+
+                кількість_num = convert_to_number(товар_data["кількість"])
+                ціна_num = convert_to_number(товар_data["ціна за одиницю"])
+
+                # B - нумерація (6, 7, 8...)
+                safe_set_cell_value(sheet, current_row, 2, base_b_number + i)  # B колонка = 2
+                print(f"[DEBUG] B{current_row} = {base_b_number + i}")
+
+                # C - назви товарів
+                safe_set_cell_value(sheet, current_row, 3, товар_data["товар"])  # C колонка = 3
+
+                # G - значення 2210 (жирним шрифтом)
+                if safe_set_cell_value(sheet, current_row, 7, g_column_value):  # G колонка = 7
+                    try:
+                        g_cell = sheet.cell(current_row, 7)
+                        if not is_merged_cell(sheet, current_row, 7):
+                            if g_cell.font:
+                                g_cell.font = Font(
+                                    name=g_cell.font.name,
+                                    size=g_cell.font.size,
+                                    bold=True,
+                                    italic=g_cell.font.italic,
+                                    color=g_cell.font.color
+                                )
+                            else:
+                                g_cell.font = Font(bold=True)
+                    except:
+                        pass
+                print(f"[DEBUG] G{current_row} = {g_column_value} (жирним)")
+
+                # H - кількість
+                safe_set_cell_value(sheet, current_row, 8, кількість_num)  # H колонка = 8
+
+                # J - ціна за одиницю
+                safe_set_cell_value(sheet, current_row, 10, ціна_num)  # J колонка = 10
+
+                print(f"[DEBUG] Рядок {current_row}: товар='{товар_data['товар']}' (C{current_row}), "
+                      f"кількість={кількість_num} (H{current_row}), ціна={ціна_num} (J{current_row})")
+
+            # Знаходимо правильний рядок для загальної суми
+            # Враховуємо що структура зміщена на кількість доданих рядків
+            additional_rows = max(0, товари_count - 1)
+
+            # Початок пошуку - після останнього товару + зміщення структури
+            search_start = start_row + товари_count + additional_rows
+            search_end = search_start + 10
+
+            total_sum_row = None
+
+            # Шукаємо рядок з "у т. ч. за КЕКВ:" або подібний текст для суми
+            for row in range(search_start, search_end):
+                try:
+                    # Перевіряємо різні стовпці для пошуку тексту
+                    for col in ['C', 'B', 'D']:
+                        cell_value = sheet[f'{col}{row}'].value
+                        if cell_value and ("у т. ч. за КЕКВ:" in str(cell_value) or
+                                           "разом" in str(cell_value).lower() or
+                                           "всього" in str(cell_value).lower() or
+                                           "сума" in str(cell_value).lower()):
+                            total_sum_row = row
+                            print(f"[DEBUG] Знайдено рядок для суми на позиції {row} в стовпці {col}: {cell_value}")
+                            break
+                    if total_sum_row:
+                        break
+                except:
+                    continue
+
+            # Якщо не знайшли автоматично, використовуємо розрахункову позицію
+            if not total_sum_row:
+                total_sum_row = search_start + 2  # Орієнтовна позиція
+                print(f"[DEBUG] Використовуємо розрахункову позицію для суми: {total_sum_row}")
+
+            # Записуємо загальну суму безпечним способом
+            if safe_set_cell_value(sheet, total_sum_row, 11, загальна_сума):  # K колонка = 11
+                print(f"[DEBUG] Загальна сума {загальна_сума:.2f} записана в K{total_sum_row}")
+            else:
+                print(f"[WARNING] Не вдалося записати суму в K{total_sum_row}, пробуємо інші ячейки")
+
+            # Додатково перевіряємо і заповнюємо суму в інших можливих місцях
+            for offset in [-1, 0, 1, 2]:
+                try:
+                    check_row = total_sum_row + offset
+                    for col_num, col_letter in [(11, 'K'), (12, 'L'), (13, 'M')]:
+                        if not is_merged_cell(sheet, check_row, col_num):
+                            cell_value = sheet.cell(check_row, col_num).value
+                            if cell_value is None:  # Якщо ячейка пуста, можливо тут потрібна сума
+                                # Перевіряємо чи є поруч текст що вказує на потребу в сумі
+                                adjacent_text = (sheet[f'C{check_row}'].value or
+                                                 sheet[f'B{check_row}'].value or
+                                                 sheet[f'D{check_row}'].value)
+                                if adjacent_text and ("сума" in str(adjacent_text).lower() or
+                                                      "разом" in str(adjacent_text).lower() or
+                                                      "всього" in str(adjacent_text).lower()):
+                                    if safe_set_cell_value(sheet, check_row, col_num, загальна_сума):
+                                        print(f"[DEBUG] Додатково записана сума в {col_letter}{check_row}")
+                except:
+                    continue
+
+            # Зберігаємо файл
+            workbook.save(output_path)
+            workbook.close()
+
+            print(f"[SUCCESS] Кошторис збережено у файл: {output_path}")
+            messagebox.showinfo("Успіх", f"Кошторис успішно збережено у файл:\n{output_path}\n\n"
+                                         f"Додано {товари_count} товарів з правильним форматуванням!\n"
+                                         f"Всі рядки нижче автоматично зміщені на {additional_rows} позицій.")
+            return output_path
+        else:
+            # Якщо openpyxl недоступний, створюємо текстовий файл
+            return save_koshtorys_to_text(захід, адреса, дата, товари, загальна_сума, сума_прописом)
+
+    except Exception as e:
+        error_msg = f"Помилка при збереженні Excel файлу: {str(e)}"
+        print(f"[ERROR] {error_msg}")
+        traceback.print_exc()
+        messagebox.showerror("Помилка", error_msg)
+        # Якщо не вдалося зберегти Excel, спробуємо текстовий формат
+        return save_koshtorys_to_text(захід, адреса, дата, товари, загальна_сума, сума_прописом)
+
+
+def save_koshtorys_to_text(захід, адреса, дата, товари, загальна_сума, сума_прописом):
+    """Зберігає кошторис у текстовий файл (резервний варіант)"""
+    try:
+        output_path = f"кошторис_заповнений_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("=" * 60 + "\n")
+            f.write("                    КОШТОРИС\n")
+            f.write("=" * 60 + "\n\n")
+
+            if захід:
+                f.write(f"Захід: {захід}\n")
+            if адреса:
+                f.write(f"Місце проведення: {адреса}\n")
+            if дата:
+                f.write(f"Дата: {дата}\n")
+
+            f.write("\n" + "-" * 60 + "\n")
+            f.write("ТОВАРИ ТА ПОСЛУГИ:\n")
+            f.write("-" * 60 + "\n")
+
+            for i, товар_data in enumerate(товари):
+                кількість_num = convert_to_number(товар_data["кількість"])
+                ціна_num = convert_to_number(товар_data["ціна за одиницю"])
+                сума_товару = кількість_num * ціна_num
+
+                f.write(f"{i + 1:2d}. {товар_data['товар']}\n")
+                f.write(f"    Кількість: {кількість_num} {товар_data['одиниця виміру']}\n")
+                f.write(f"    Ціна за одиницю: {ціна_num:.2f} грн\n")
+                f.write(f"    Сума: {сума_товару:.2f} грн\n\n")
+
+            f.write("-" * 60 + "\n")
+            f.write(f"ЗАГАЛЬНА СУМА: {загальна_сума:.2f} грн\n")
+            f.write(f"Сума прописом: {сума_прописом}\n")
+            f.write("=" * 60 + "\n")
+
+        print(f"[SUCCESS] Кошторис збережено у текстовий файл: {output_path}")
+        messagebox.showinfo("Успіх", f"Кошторис успішно збережено у текстовий файл:\n{output_path}")
+        return output_path
+
+    except Exception as e:
+        error_msg = f"Помилка при збереженні текстового файлу: {str(e)}"
+        print(f"[ERROR] {error_msg}")
+        messagebox.showerror("Помилка", error_msg)
+        return None
+
+
+def fill_koshtorys(document_blocks):
+    """Основна функція заповнення кошторису"""
+    try:
+        if not document_blocks:
+            messagebox.showwarning("Увага", "Не знайдено даних для заповнення кошторису.")
+            return False
+
+        # Отримуємо дані з першого блоку для загальних полів
+        first_block = document_blocks[0]
+        first_entries = first_block.get("entries", {})
+
+        # Отримуємо основні поля
+        захід = get_entry_value(first_entries, "захід")
+        адреса = get_entry_value(first_entries, "адреса")
+        дата = get_entry_value(first_entries, "дата")
+
+        # Отримуємо список товарів
+        товари = get_товари_from_blocks(document_blocks)
+
+        if not товари:
+            messagebox.showwarning("Увага", "Не знайдено товарів для заповнення кошторису.\n"
+                                            "Переконайтесь, що у блоках договорів заповнені поля:\n"
+                                            "- товар/назва/найменування/предмет\n"
+                                            "- кількість\n"
+                                            "- ціна за одиницю")
+            return False
+
+        print(f"[DEBUG] Знайдено товарів: {len(товари)}")
+        print(f"[DEBUG] Захід: {захід}")
+        print(f"[DEBUG] Адреса: {адреса}")
+        print(f"[DEBUG] Дата: {дата}")
+
+        # Виводимо інформацію про товари та рахуємо загальну суму
+        загальна_сума = 0.0
+        товари_info = []
+
+        for i, товар_data in enumerate(товари):
+            кількість_num = convert_to_number(товар_data["кількість"])
+            ціна_num = convert_to_number(товар_data["ціна за одиницю"])
+            сума_товару = кількість_num * ціна_num
+            загальна_сума += сума_товару
+
+            товар_info = (f"{i + 1}. {товар_data['товар']} - "
+                          f"{кількість_num} {товар_data['одиниця виміру']} × "
+                          f"{ціна_num:.2f} грн = {сума_товару:.2f} грн")
+            товари_info.append(товар_info)
+
+            print(f"[DEBUG] Товар {i + 1}: {товар_data['товар']}, "
+                  f"кількість: {кількість_num} {товар_data['одиниця виміру']}, "
+                  f"ціна: {ціна_num:.2f}, разом: {сума_товару:.2f}")
+
+        print(f"[DEBUG] Загальна сума: {загальна_сума:.2f}")
+
+        # Формуємо детальне повідомлення
+        товари_список = "\n".join(товари_info)
+        сума_прописом = number_to_ukrainian_text(загальна_сума).capitalize()
+
+        detail_message = (f"ДАНІ ДЛЯ КОШТОРИСУ:\n\n"
+                          f"Захід: {захід}\n"
+                          f"Місце проведення: {адреса}\n"
+                          f"Дата: {дата}\n\n"
+                          f"ТОВАРИ ТА ПОСЛУГИ:\n{товари_список}\n\n"
+                          f"ЗАГАЛЬНА СУМА: {загальна_сума:.2f} грн\n"
+                          f"Сума прописом: {сума_прописом}")
+
+        # Зберігаємо кошторис у файл з правильним форматуванням
+        saved_file = save_koshtorys_to_excel(захід, адреса, дата, товари, загальна_сума, сума_прописом)
+
+        return saved_file is not None
+
+    except Exception as e:
+        error_msg = f"Помилка при обробці кошторису: {str(e)}"
+        print(f"[ERROR] {error_msg}")
+        traceback.print_exc()
+        messagebox.showerror("Помилка", error_msg)
+        return False
+
+
+def generate_koshtorys_only(document_blocks):
+    """Функція для генерації тільки кошторису (для окремої кнопки)"""
+    return fill_koshtorys(document_blocks)
