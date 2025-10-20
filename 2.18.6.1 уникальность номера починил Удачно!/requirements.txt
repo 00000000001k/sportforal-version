@@ -1,0 +1,6 @@
+customtkinter>=5.2.0
+requests>=2.25.0
+packaging>=21.0
+pywin32>=306
+python-docx>=0.8.11
+openpyxl>=3.0.0
